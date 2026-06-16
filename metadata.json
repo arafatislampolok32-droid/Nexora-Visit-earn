@@ -1,0 +1,6 @@
+{
+  "name": "Nexora Visit Earn",
+  "description": "A Telegram Mini App visit-to-earn platform where users earn rewards by visiting websites.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

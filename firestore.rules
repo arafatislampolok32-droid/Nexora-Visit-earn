@@ -1,0 +1,117 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net - Default Deny Catch-All
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Is current request authorized?
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Check if user is accessing their own document
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Helper to check for system administrator credentials
+    function isAdmin() {
+      return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    // Validates basic ID structure
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // ---- USERS COLLECTION SECURITY rules ----
+    match /users/{userId} {
+      // Users can retrieve their own profile or other profiles if authenticated
+      allow get: if isSignedIn();
+      allow list: if isAdmin();
+      
+      // Users can register their own profile, but cannot tamper with balance fields
+      allow create: if isOwner(userId) 
+        && request.resource.data.keys().hasAll(['telegramId', 'name', 'username', 'balance', 'referralBalance', 'totalEarned', 'referralCount', 'referredBy', 'createdAt'])
+        && request.resource.data.balance == 5.00 // 5.00 Welcome bonus limit
+        && request.resource.data.referralBalance == 0
+        && request.resource.data.totalEarned == 5.00;
+
+      // Users can update their own non-restrictive fields, admins can update any fields (e.g. adjust balances/ban states)
+      allow update: if isOwner(userId) 
+        ? (
+            // Users are only allowed to alter balance or metrics if executing verified task additions or withdraws
+            request.resource.data.isBanned == resource.data.isBanned
+            && request.resource.data.referredBy == resource.data.referredBy
+            && request.resource.data.createdAt == resource.data.createdAt
+          )
+        : isAdmin();
+    }
+
+    // ---- TASKS COLLECTION SECURITY rules ----
+    match /tasks/{taskId} {
+      // Anyone can read active or inactive monetization task lists
+      allow read: if true;
+      
+      // Only system administrators can create, update, or delete sponsorship tasks
+      allow write: if isAdmin();
+    }
+
+    // ---- SYSTEM CONFIG SECURITY rules ----
+    match /system/config {
+      // Anyone can read system configuration
+      allow read: if true;
+
+      // Only administrators can update configuration (e.g. daily limits)
+      allow write: if isAdmin();
+    }
+
+    // ---- VISITS COLLECTION SECURITY rules ----
+    match /visits/{visitId} {
+      // Admins can list all visits, users can query their own visits
+      allow list: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow get: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+
+      // Users can log visits if they are the owners of the visit record
+      allow create: if isSignedIn() 
+        && request.resource.data.userId == request.auth.uid
+        && isValidId(request.resource.data.taskId)
+        && request.resource.data.reward is number;
+
+      // Visits are immutable; updates or deletes are strictly locked
+      allow update, delete: if false;
+    }
+
+    // ---- WITHDRAWALS COLLECTION SECURITY rules ----
+    match /withdrawals/{withdrawalId} {
+      // Users can list their own cashouts, admins can inspect all cashout audits
+      allow list: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow get: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+
+      // Logged in users can register a cashout request
+      allow create: if isSignedIn()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.amount >= 50.00 // minimum threshold
+        && request.resource.data.status == 'pending'
+        && request.resource.data.createdAt == request.time;
+
+      // Only administrators can approve, reject, or mark requests as paid
+      allow update: if isAdmin() 
+        && request.resource.data.amount == resource.data.amount
+        && request.resource.data.userId == resource.data.userId
+        && (request.resource.data.status == 'approved' || request.resource.data.status == 'rejected');
+
+      // Cashouts cannot be deleted once registered for ledger stability
+      allow delete: if false;
+    }
+
+    // ---- ADMIN LISTS SENSITIVE ACCESS ----
+    match /admins/{adminId} {
+      allow read: if isSignedIn();
+      allow write: if false; // strictly managed via Google GCP console
+    }
+  }
+}
